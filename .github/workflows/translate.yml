@@ -99,7 +99,7 @@ jobs:
           git config user.name "Ivan Andrianov"
           git config user.email "59061121+andr1anoff@users.noreply.github.com"
           git add done && git commit -q -m "result ${{ inputs.batch }} ${{ matrix.file }}"
-          for i in 1 2 3 4 5 6; do git pull -q --rebase && git push -q && exit 0; sleep $((RANDOM % 10 + 5)); done
+          for i in 1 2 3 4 5 6; do git pull -q --rebase >/dev/null 2>&1 && git push -q >/dev/null 2>&1 && exit 0; sleep $((RANDOM % 10 + 5)); done
           exit 1
 
   notify:
@@ -109,10 +109,18 @@ jobs:
     steps:
       - name: Start publishing in the calling repository
         env:
-          GH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+          PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
           NOTIFY: ${{ secrets.NOTIFY }}
         run: |
-          REPO="${NOTIFY%/*}"; FILE="${NOTIFY##*/}"
-          gh api -X POST "repos/${REPO}/actions/workflows/${FILE}/dispatches" \
-            -f ref=main -f "inputs[batch]=${{ inputs.batch }}" > /dev/null
-          echo "done, next step started"
+          # A pasted secret may carry a trailing newline; parts of NOTIFY are
+          # masked too, and the API's own messages never reach the log.
+          export GH_TOKEN="$(printf %s "$PUBLISH_TOKEN" | tr -d '[:space:]')"
+          N="$(printf %s "$NOTIFY" | tr -d '[:space:]')"
+          REPO="${N%/*}"; FILE="${N##*/}"
+          echo "::add-mask::${REPO}"; echo "::add-mask::${REPO#*/}"; echo "::add-mask::${FILE}"
+          if gh api -X POST "repos/${REPO}/actions/workflows/${FILE}/dispatches" \
+              -f ref=main -f "inputs[batch]=${{ inputs.batch }}" > /dev/null 2>&1; then
+            echo "done, next step started"
+          else
+            echo "could not start the next step"; exit 1
+          fi
