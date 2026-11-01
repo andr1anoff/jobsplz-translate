@@ -32,7 +32,7 @@ const KEEP = /@|https?:\/\/|www\.|\+?\d[\d\s/()-]{6,}\d/;
 function keepAsIs(s) {
   if (KEEP.test(s)) return true;
   const words = s.replace(/[^A-Za-zÄÖÜäöüß\s-]/g, " ").split(/\s+/).filter((w) => w.length > 2);
-  return words.length <= 3;
+  return words.length <= 2; // "Barista", "Café Kranzler"; three words are a phrase to translate
 }
 
 export function validate(src, out, lang, { mock = false } = {}) {
