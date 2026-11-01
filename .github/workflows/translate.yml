@@ -1,0 +1,118 @@
+name: Translate
+
+# Runs only when started by its owner (workflow_dispatch). There is no
+# pull_request trigger: workflows from forks never run here and never see
+# the secrets.
+#
+# Each matrix entry translates one batch file from a private data repository
+# and writes the result back there. Logs carry counts and timings, no text.
+#
+# Secrets: DATA_REPO (owner/name of the data repository), DATA_TOKEN
+# (contents read/write on that repository only), NOTIFY (owner/name/workflow
+# file to start when done), PUBLISH_TOKEN (may start that workflow, nothing
+# else). Repository names live in secrets so the logs never show them.
+
+run-name: Translate ${{ inputs.batch }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch:
+        description: "Batch id"
+        required: true
+      matrix:
+        description: 'JSON list of {"file": "...", "model": "4b|12b"}'
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  LLAMA_TAG: b12017
+
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        include: ${{ fromJSON(inputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Fetch batch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.DATA_REPO }}
+          token: ${{ secrets.DATA_TOKEN }}
+          path: data
+          sparse-checkout: |
+            todo
+            done
+
+      - name: Model settings
+        id: m
+        run: |
+          case "${{ matrix.model }}" in
+            12b) echo "url=https://huggingface.co/mradermacher/translategemma-12b-it-GGUF/resolve/main/translategemma-12b-it.Q4_K_M.gguf" >> "$GITHUB_OUTPUT"; echo "id=translategemma-12b-q4" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "url=https://huggingface.co/mradermacher/translategemma-4b-it-GGUF/resolve/main/translategemma-4b-it.Q4_K_M.gguf" >> "$GITHUB_OUTPUT"; echo "id=translategemma-4b-q4" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Restore model
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/models
+          key: ${{ steps.m.outputs.id }}-${{ env.LLAMA_TAG }}
+
+      - name: Download model and llama.cpp
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/models/llama
+          curl -fsSL -o ~/models/model.gguf "${{ steps.m.outputs.url }}"
+          curl -fsSL -o /tmp/llama.tgz "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/llama-${LLAMA_TAG}-bin-ubuntu-x64.tar.gz"
+          tar -xzf /tmp/llama.tgz -C ~/models/llama
+
+      - name: Start model server
+        run: |
+          SERVER=$(find ~/models/llama -name llama-server -type f | head -1)
+          echo "cpus $(nproc), memory $(free -g | awk '/Mem/{print $2}') GB"
+          LD_LIBRARY_PATH="$(dirname "$SERVER")" nohup "$SERVER" -m ~/models/model.gguf -c 4096 -t "$(nproc)" -np 1 \
+            --host 127.0.0.1 --port 8080 --log-disable > /dev/null 2>&1 &
+
+      - name: Translate
+        run: node worker.mjs --in "data/todo/${{ matrix.file }}.json" --out /tmp/result.json --model "${{ steps.m.outputs.id }}" --budget-min 320
+
+      - name: Return results
+        if: always()
+        working-directory: data
+        run: |
+          [ -f /tmp/result.json ] || exit 0
+          mkdir -p done
+          cp /tmp/result.json "done/${{ inputs.batch }}-${{ matrix.file }}.json"
+          git config user.name "Ivan Andrianov"
+          git config user.email "59061121+andr1anoff@users.noreply.github.com"
+          git add done && git commit -q -m "result ${{ inputs.batch }} ${{ matrix.file }}"
+          for i in 1 2 3 4 5 6; do git pull -q --rebase && git push -q && exit 0; sleep $((RANDOM % 10 + 5)); done
+          exit 1
+
+  notify:
+    needs: translate
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Start publishing in the calling repository
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+          NOTIFY: ${{ secrets.NOTIFY }}
+        run: |
+          REPO="${NOTIFY%/*}"; FILE="${NOTIFY##*/}"
+          gh api -X POST "repos/${REPO}/actions/workflows/${FILE}/dispatches" \
+            -f ref=main -f "inputs[batch]=${{ inputs.batch }}" > /dev/null
+          echo "done, next step started"
