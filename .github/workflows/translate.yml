@@ -87,7 +87,7 @@ jobs:
             --host 127.0.0.1 --port 8080 --log-disable > /dev/null 2>&1 &
 
       - name: Translate
-        run: node worker.mjs --in "data/todo/${{ matrix.file }}.json" --out /tmp/result.json --model "${{ steps.m.outputs.id }}" --budget-min 320
+        run: node worker.mjs --in "data/todo/${{ inputs.batch }}/${{ matrix.file }}.json" --out /tmp/result.json --model "${{ steps.m.outputs.id }}" --budget-min 320
 
       - name: Return results
         if: always()
